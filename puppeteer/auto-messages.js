@@ -201,7 +201,7 @@ async function sendMessage(conversation, text, page) {
     let url = await page.evaluate(() => {
         return window.location.href;
     });
-    cachedConversationIds.set(person, url.split("/").pop());
+    //cachedConversationIds.set(person, url.split("/").pop());
     await page.type(".input", text + "\n");
     await page.emulateIdleState({ isUserActive: false, isScreenUnlocked: false });
     return parseInt(url.split("/").pop());
