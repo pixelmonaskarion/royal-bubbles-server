@@ -1,15 +1,13 @@
-const puppeteer = require("puppeteer");
-const WebSocketClient = require('websocket').client;
-const fs = require('fs');
+import puppeteer from 'puppeteer';
+import fs from "fs";
+import startServer from "./server.js";
 
 let cachedConversationIds = new Map();
 
 (async () => {
-    //create a event listener for when the program exits
-    saveOnExit = function () {
+    let saveOnExit = function () {
         console.log("saving");
         process.stdin.resume();
-        //save cachedConversationIds to a file as json 
         let jsonCachedConversationIds = JSON.stringify(Array.from(cachedConversationIds));
         try {
             fs.writeFileSync('cachedConversationIds.json', jsonCachedConversationIds);
@@ -21,21 +19,15 @@ let cachedConversationIds = new Map();
         process.exit();
     };
     process.on('exit', saveOnExit);
-
-    //catches ctrl+c event
     process.on('SIGINT', saveOnExit);
-
-    // catches "kill pid" (for example: nodemon restart)
     process.on('SIGUSR1', saveOnExit);
     process.on('SIGUSR2', saveOnExit);
-
-    //catches uncaught exceptions
     process.on('uncaughtException', (err) => {
         console.log("yo, the code crashed");
         console.error(err);
         saveOnExit();
     });
-    //load cachedConversationIds from a file as json
+
     let jsonCachedConversationIds = fs.readFileSync("cachedConversationIds.json");
     cachedConversationIds = new Map(JSON.parse(jsonCachedConversationIds));
     console.log("loaded cachedConversationIds: ", cachedConversationIds);
@@ -44,28 +36,8 @@ let cachedConversationIds = new Map();
     const page = await browser.newPage();
     await page.goto("https://messages.google.com/web/conversations/new");
     await page.setViewport({ width: 2080, height: 2024 });
-
-    let ws = new WebSocketClient();
-    ws.on('connect', function (connection) {
-        connection.on('error', function (error) {
-            console.log('Connection Error: ' + error.toString());
-        });
-        connection.on('close', function () {
-            console.log('Connection Closed');
-        });
-        connection.on('message', async function (event) {
-            console.log("GOT MESSAGE:", event.utf8Data);
-            let message = JSON.parse(event.utf8Data).message;
-            console.log(message);
-            await sendMessage(message.person, message.text, page);
-            connection.send("Success");
-        });
-        console.log("started websocket");
-    });
-    ws.on('connectFailed', function (error) {
-        console.log('Connect Error: ' + error.toString());
-    });
-    ws.connect("http://127.0.0.1:8000/backend");
+    console.log("starting server...");
+    startServer(async (person, start, end) => { return await getMessages(person, start, end, page) }, async (person, text) => { await sendMessage(person, text, page) }, async () => {return await findChats(page)});
 })();
 
 //"https://instantmessaging-pa.googleapis.com/$rpc/google.internal.communications.instantmessaging.v1.Messaging/SendMessage"
@@ -76,28 +48,62 @@ let cachedConversationIds = new Map();
 // /$rpc/google.internal.communications.instantmessaging.v1.Messaging/Echo
 // {X-Goog-Api-Key: "AIzaSyCA4RsOZUFrm9whhtGosPlJLmVPnfSHKz8"}
 
-async function getMessages(person, start, end, page) {
-    if (!cachedConversationIds.has(person)) {
-        await page.emulateIdleState({ isUserActive: true, isScreenUnlocked: true });
-        await page.waitForSelector("input");
-        await typeInInput(person, page);
-        await page.type("input", " ");
-        while (true) {
-            let input = await (await page.$('input'));
-            if (input != undefined) {
-                input.press('Enter');
-            } else {
-                break;
+async function findChats(page) {
+    return new Map(Object.entries(await page.evaluate(async () => {
+        await new Promise((resolve) => {
+            let interval = setInterval(() => {
+                if (document.getElementsByTagName("mws-conversation-list-item").length > 0) {
+                    clearInterval(interval);
+                    resolve();
+                }
+            }, 10);
+        });
+        let conversations = document.getElementsByTagName("mws-conversation-list-item");
+        let conversation_information = new Map();
+        try {
+            for (var i = 0; i < conversations.length; i++) {
+                let conv_url_parts = conversations[i].firstChild.href.split("/");
+                let conv_id = parseInt(conv_url_parts[conv_url_parts.length - 1]);
+                let text_content = conversations[i].firstChild.getElementsByClassName("text-content");
+                let h3 = text_content.item(0).firstChild;
+                let span = h3.childNodes.item(2);
+                let conv_name = span.textContent;
+                conversation_information.set(conv_id, { name: conv_name });
             }
+        } catch (e) {
+            console.log("boohoo", e);
+        }
+        return Object.fromEntries(conversation_information);
+    })).map(([k, v]) => [parseInt(k), v]));
+}
+
+async function getMessages(conversation, start, end, page) {
+    if (typeof conversation === "string") {
+        if (!cachedConversationIds.has(conversation)) {
+            await page.emulateIdleState({ isUserActive: true, isScreenUnlocked: true });
+            await page.waitForSelector("input");
+            await typeInInput(conversation, page);
+            await page.type("input", " ");
+            while (true) {
+                let input = await (await page.$('input'));
+                if (input != undefined) {
+                    input.press('Enter');
+                } else {
+                    break;
+                }
+            }
+        } else {
+            gotoFast("/web/conversations/" + cachedConversationIds.get(conversation), page);
         }
     } else {
-        gotoFast("/web/conversations/" + cachedConversationIds.get(person), page);
+        gotoFast("/web/conversations/" + conversation, page);
     }
     await page.waitForSelector(".input");
     let message_objects = await page.evaluate(async () => {
         let messages = document.getElementsByTagName("mws-message-wrapper");
         await new Promise((resolve) => {
             let interval = setInterval(() => {
+                console.log(messages.length);
                 if (messages.length > 5) {
                     clearInterval(interval);
                     resolve();
@@ -135,10 +141,13 @@ async function getMessages(person, start, end, page) {
                     }, 10);
                 });
                 let message_part_content = part_content_container.childNodes.item(0);
+                console.log(message_part_content.className);
+                let incoming = message_part_content.className.includes(" incoming ")
+                console.log(incoming);
                 let text_message_content = message_part_content.childNodes.item(0);
                 let text_message = text_message_content.childNodes.item(3);
                 let message_body = text_message.innerText;
-                let message_object = { summary: message_summary, text: message_body };
+                let message_object = { summary: message_summary, text: message_body, incoming: incoming };
                 message_objects.push(message_object);
             } catch (error) {
                 console.log(error);
@@ -147,7 +156,7 @@ async function getMessages(person, start, end, page) {
         return message_objects;
     });
     message_objects.reverse();
-    return message_objects.slice(start, (end != -1 && end <  message_objects.length) ? end + 1 : undefined);
+    return message_objects.slice(start, (end != -1 && end < message_objects.length) ? end + 1 : undefined);
 }
 
 async function typeInInput(text, page) {
@@ -165,23 +174,27 @@ async function typeInInput(text, page) {
     }, text);
 }
 
-async function sendMessage(person, text, page) {
-    //if cachedConversationIds doesn't have this person cached do this 
-    if (!cachedConversationIds.has(person)) {
-        await page.emulateIdleState({ isUserActive: true, isScreenUnlocked: true });
-        await page.waitForSelector("input");
-        await typeInInput(person, page);
-        await page.type("input", " ");
-        while (true) {
-            let input = await (await page.$('input'));
-            if (input != undefined) {
-                input.press('Enter');
-            } else {
-                break;
+async function sendMessage(conversation, text, page) {
+    if (typeof conversation === "string") {
+        if (!cachedConversationIds.has(conversation)) {
+            await page.emulateIdleState({ isUserActive: true, isScreenUnlocked: true });
+            gotoFast("/web/conversations/new", page);
+            await page.waitForSelector("input");
+            await typeInInput(conversation, page);
+            await page.type("input", " ");
+            while (true) {
+                let input = await (await page.$('input'));
+                if (input != undefined) {
+                    input.press('Enter');
+                } else {
+                    break;
+                }
             }
+        } else {
+            gotoFast("/web/conversations/" + cachedConversationIds.get(conversation), page);
         }
     } else {
-        gotoFast("/web/conversations/" + cachedConversationIds.get(person), page);
+        gotoFast("/web/conversations/" + conversation, page);
     }
     await page.waitForSelector(".input");
     //get the last part of the url and add it to the cachedConversationIds map with the person as the key
@@ -191,8 +204,8 @@ async function sendMessage(person, text, page) {
     cachedConversationIds.set(person, url.split("/").pop());
     await page.type(".input", text + "\n");
     await page.emulateIdleState({ isUserActive: false, isScreenUnlocked: false });
+    return parseInt(url.split("/").pop());
     // await (await page.$("a[href='/web/conversations/new']")).click();
-    gotoFast("/web/conversations/new", page);
 }
 
 function gotoFast(url, page) {

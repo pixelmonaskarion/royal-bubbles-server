@@ -1,0 +1,52 @@
+<p>person</p>
+<input id="person" , type="text">
+<button onclick="get_messages()">Get Messages</button>
+<div id="messages"></div>
+<p>message</p>
+<input id="text" , type="text">
+<button onclick="send()">Send</button>
+<button onclick="get_chats()">Get Chats</button>
+<div id="chats"></div>
+<script>
+    async function send() {
+        let person = document.getElementById("person").value;
+        let text = document.getElementById("text").value;
+        let body = JSON.stringify({ person: person, text: text });
+        let result = await fetch(window.location.href+"post-message", {
+            method: "POST",
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: body,
+        });
+        console.log("finished send:", result.status);
+    }
+    async function get_messages() {
+        let person = document.getElementById("person").value;
+        let messages = await (await fetch(window.location.href+"get-messages/" + person)).json();
+        let messages_div = document.getElementById("messages");
+        while (messages_div.firstChild) {
+            messages_div.removeChild(messages_div.firstChild);
+        }
+        messages.reverse();
+        for (var i = 0; i < messages.length; i++) {
+            let p = document.createElement("p");
+            p.innerText = ((messages[i].incoming) ? person : "You") + ": " + messages[i].text;
+            messages_div.appendChild(p);
+        }
+    }
+    async function get_chats() {
+        let json = await (await fetch(window.location.href+"get-chats/")).json();
+        console.log(json);
+        let chats = new Map(json);
+        let chats_div = document.getElementById("chats");
+        while (chats_div.firstChild) {
+            chats_div.removeChild(chats_div.firstChild);
+        }
+        chats.forEach((chat, id) => {
+            let p = document.createElement("p");
+            p.innerText = id + ": " + chat.name;
+            chats_div.appendChild(p);
+        });
+    }
+</script>

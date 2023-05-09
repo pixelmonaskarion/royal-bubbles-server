@@ -1,3 +1,5 @@
 puppeteer/user_data
 target
 Cargo.lock
+puppeteer/node_modules
+puppeteer/cachedConversationIds.json
